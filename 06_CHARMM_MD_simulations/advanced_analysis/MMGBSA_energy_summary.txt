@@ -1,0 +1,24 @@
+=======================================================
+  Effective Binding Energy Summary
+=======================================================
+
+  FAD (3 replicas):
+  vdW                  =   -57.13 ± 1.18 kcal/mol
+  Electrostatic        =  -505.07 ± 9.27 kcal/mol
+  GB polar             =   521.45 ± 8.22 kcal/mol
+  SASA nonpolar        =    -8.73 ± 0.16 kcal/mol
+  TOTAL ΔG binding     =   -49.47 ± 2.20 kcal/mol
+
+  PCAR (3 replicas):
+  vdW                  =   -44.92 ± 2.74 kcal/mol
+  Electrostatic        =   -95.47 ± 2.76 kcal/mol
+  GB polar             =   111.61 ± 3.85 kcal/mol
+  SASA nonpolar        =    -7.46 ± 0.44 kcal/mol
+  TOTAL ΔG binding     =   -36.23 ± 3.76 kcal/mol
+
+  CAR (3 replicas):
+  vdW                  =   -14.62 ± 4.00 kcal/mol
+  Electrostatic        =   -59.53 ± 19.58 kcal/mol
+  GB polar             =    64.07 ± 21.95 kcal/mol
+  SASA nonpolar        =    -2.97 ± 0.38 kcal/mol
+  TOTAL ΔG binding     =   -13.04 ± 2.59 kcal/mol

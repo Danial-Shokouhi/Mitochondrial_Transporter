@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ---- R ----
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+
+# ---- MD simulation output (large; regenerate from the scripts) ----
+*.xtc
+*.trr
+*.edr
+*.cpt
+*.tpr
+*.gro
+*.log
+step*.pdb
+
+# ---- Docking / structure output ----
+*.dlg
+*.pdbqt.out
+
+# ---- Misc ----
+*.tmp
+*.bak

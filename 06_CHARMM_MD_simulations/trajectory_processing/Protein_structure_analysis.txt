@@ -1,0 +1,494 @@
+STEP-1  Build the index file
+
+gmx make_ndx -f step7_production.tpr -o index.ndx
+# inside make_ndx, just type:
+q
+
+
+STEP-2  DSSP secondary structure over the trajectory
+
+gmx dssp \
+    -s step7_production.tpr \
+    -f step7_production.xtc \
+    -n index.ndx \
+    -o dssp.dat
+
+
+STEP-3  Ca coordinates over the trajectory
+
+gmx traj -s step7_production.tpr -f step7_production.xtc -n index.ndx -ox ca_coords.xvg
+# select: 3  C-alpha
+
+
+STEP-4  Find the membrane Z-center from phosphate density
+
+gmx make_ndx -f step7_production.tpr -o phosphate.ndx
+
+For Apo systems (no ligand):
+13 & a P
+name 28 P_PLPE
+14 & a P
+name 29 P_POPG
+15 & a P
+name 30 P_POPC
+16 & a P
+name 31 P_PLPS
+17 & a P
+name 32 P_PLPG
+18 & a P
+name 33 P_POPS
+19 & a P
+name 34 P_DLIPE
+20 & a P
+name 35 P_PLPC
+21 & a P
+name 36 P_PLPI
+22 & a P3
+name 37 P_LOCCL2
+23 & a P
+name 38 P_PNPI
+24 & a P3
+name 39 P_LNCCL2
+28 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39
+name 40 ALL_PHOSPHATES
+q
+
+For ligand-containing systems (group numbers shift by one due to the ligand):
+14 & a P
+name 29 P_PLPC
+15 & a P
+name 30 P_PLPE
+16 & a P
+name 31 P_POPC
+17 & a P
+name 32 P_PLPS
+18 & a P3
+name 33 P_LOCCL2
+19 & a P
+name 34 P_PLPI
+20 & a P
+name 35 P_POPG
+21 & a P
+name 36 P_DLIPE
+22 & a P
+name 37 P_PLPG
+23 & a P
+name 38 P_POPS
+24 & a P
+name 39 P_PNPI
+25 & a P3
+name 40 P_LNCCL2
+29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 40
+name 41 ALL_PHOSPHATES
+q
+
+gmx density -s step7_production.tpr -f step7_production.xtc -n phosphate.ndx -d Z -o density_phosphate.xvg
+# select: ALL_PHOSPHATES
+
+xmgrace density_phosphate.xvg
+
+# or, to get the peak values directly:
+grep -v "^[@#]" density_phosphate.xvg | sort -k2 -rn | head -5
+
+Example output:
+     2.74475          114.362
+     2.55545           104.62
+      6.5306          102.245
+      6.7199          97.4108
+     2.93404          67.3577
+
+membrane_Z_center = (peak1_Z + peak2_Z) / 2
+e.g. (2.74475 + 6.5306) / 2 = 4.637675 nm
+
+
+STEP-5  Classify helices (TM vs matrix) with TMH.py
+
+python3 TMH.py dssp.dat ca_coords.xvg 4.637675
+
+------------------------------------------------------------------
+TMH.py
+------------------------------------------------------------------
+
+#!/usr/bin/env python3
+"""
+TM vs matrix helix discrimination for an MCF-fold transporter in a
+lipid bilayer, from a GROMACS production trajectory.
+
+DSSP alone marks every helical residue as 'H' regardless of
+orientation, so it cannot distinguish the 6 transmembrane (TM)
+helices (~22 aa, span the bilayer, roughly parallel to the membrane
+normal) from the 3 short matrix helices (h12, h34, h56; ~8-15 aa,
+horizontal, at the matrix-facing membrane edge). This script adds
+position and orientation filtering on top of DSSP occupancy:
+
+  1. DSSP helix occupancy > 70% over >= 8 consecutive residues
+  2. Z-position: helix center must fall within the membrane region
+  3. Tilt angle: angle between the helix's principal axis (via PCA of
+     its Ca coordinates) and the membrane normal (Z)
+       - TM helix: tilt < 55 degrees
+       - matrix helix: tilt > 60 degrees
+
+Inputs required:
+    dssp.dat      -- from `gmx dssp`
+    ca_coords.xvg -- from `gmx traj -ox` (C-alpha group)
+    membrane_z_center (nm) -- from `gmx density` on the phosphate
+      group (see Step 4 above): midpoint between the two phosphate
+      density peaks
+
+Usage:
+    python3 TMH.py dssp.dat ca_coords.xvg <membrane_z_center>
+    python3 TMH.py dssp.dat                      # sequence-only fallback,
+                                                    no coordinate file
+
+Dependencies: numpy (conda install numpy) -- optional; without it,
+tilt-angle classification is skipped and the script falls back to
+sequence-based classification using known MCF topology.
+"""
+
+import sys
+import os
+import math
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    print("WARNING: numpy not found. Install with: conda install numpy")
+    print("Running in Z-position-only mode (no tilt angle calculation)")
+
+# Protein-specific parameters -- adjust for a different system
+MEMBRANE_HALF_THICKNESS = 1.85   # nm, typical POPC/PLPC bilayer half-thickness
+TM_Z_SPAN_MIN = 1.5              # nm; TM helices typically span > 2 nm in Z
+TM_TILT_MAX = 55                 # degrees from the Z-axis
+MIN_HELIX_LENGTH = 8             # residues; matrix helices can be short
+TM_MIN_LENGTH = 16                # minimum length for a TM helix assignment
+
+
+def parse_dssp(filepath):
+    """Parse gmx dssp output (one line per frame, one code per residue)."""
+    VALID = set('HGIEBTSPCc~. ')
+    residue_codes = {}
+    frame_count = 0
+    n_residues = None
+    with open(filepath) as f:
+        for raw in f:
+            line = raw.rstrip('\n').strip()
+            if not line or line.startswith('#') or line.startswith('@'):
+                continue
+            if len(line) < 50:
+                continue
+            if sum(1 for c in line if c in VALID) / len(line) < 0.90:
+                continue
+            if n_residues is None:
+                n_residues = len(line)
+            frame_count += 1
+            for i, code in enumerate(line):
+                r = i + 1
+                residue_codes.setdefault(r, {})
+                residue_codes[r][code] = residue_codes[r].get(code, 0) + 1
+    return residue_codes, frame_count, n_residues
+
+
+def helix_occupancy(residue_codes, frame_count):
+    """Fraction of trajectory each residue spends in any helix state."""
+    helix_codes = {'H', 'G', 'I'}
+    return {r: sum(v for k, v in codes.items() if k in helix_codes) / frame_count
+            for r, codes in residue_codes.items()}
+
+
+def find_all_helix_segments(occupancy, threshold=0.70, min_len=8, max_gap=3):
+    """Find all helical segments regardless of type."""
+    above = sorted(r for r, o in occupancy.items() if o >= threshold)
+    if not above:
+        return []
+    segments = []
+    seg_start = seg_end = above[0]
+    for r in above[1:]:
+        if r <= seg_end + max_gap + 1:
+            seg_end = r
+        else:
+            if seg_end - seg_start + 1 >= min_len:
+                segments.append((seg_start, seg_end))
+            seg_start = seg_end = r
+    if seg_end - seg_start + 1 >= min_len:
+        segments.append((seg_start, seg_end))
+    return segments
+
+
+def parse_ca_coords(filepath, n_residues):
+    """
+    Parse gmx traj -ox output.
+    Returns: list of frames, each frame is a list of [x, y, z] per residue.
+    """
+    frames = []
+    current_frame_coords = []
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('@'):
+                if current_frame_coords and line.startswith('@'):
+                    if len(current_frame_coords) == n_residues:
+                        frames.append(current_frame_coords[:])
+                    current_frame_coords = []
+                continue
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    vals = [float(p) for p in parts]
+                    if len(vals) == 4:
+                        # one atom per line: time x y z
+                        current_frame_coords.append(vals[-3:])
+                    elif len(vals) > 4:
+                        # all atoms on one line: time x1 y1 z1 x2 y2 z2 ...
+                        xyz_vals = vals[1:]
+                        for j in range(0, len(xyz_vals) - 2, 3):
+                            current_frame_coords.append(xyz_vals[j:j+3])
+                except ValueError:
+                    continue
+    if current_frame_coords and len(current_frame_coords) >= n_residues:
+        frames.append(current_frame_coords[:n_residues])
+    return frames
+
+
+def helix_z_span(ca_coords_frames, seg_start, seg_end):
+    """Mean Z-range (max-min) of Ca atoms in a helix, averaged over frames."""
+    idx_start = seg_start - 1
+    idx_end = seg_end
+    z_spans = []
+    for frame in ca_coords_frames:
+        if idx_end > len(frame):
+            continue
+        z_vals = [frame[i][2] for i in range(idx_start, idx_end)]
+        z_spans.append(max(z_vals) - min(z_vals))
+    return sum(z_spans) / len(z_spans) if z_spans else 0.0
+
+
+def helix_center_z(ca_coords_frames, seg_start, seg_end):
+    """Mean Z-coordinate of the helix center."""
+    idx_start = seg_start - 1
+    idx_end = seg_end
+    centers = []
+    for frame in ca_coords_frames:
+        if idx_end > len(frame):
+            continue
+        z_vals = [frame[i][2] for i in range(idx_start, idx_end)]
+        centers.append(sum(z_vals) / len(z_vals))
+    return sum(centers) / len(centers) if centers else 0.0
+
+
+def helix_tilt_angle(ca_coords_frames, seg_start, seg_end):
+    """
+    Mean tilt angle (degrees) of the helix's principal axis relative to
+    the Z-axis, via PCA (first singular vector) of its Ca coordinates.
+    0 deg = parallel to Z (TM-like), 90 deg = horizontal (matrix-like).
+    """
+    if not HAS_NUMPY:
+        return None
+    idx_start = seg_start - 1
+    idx_end = seg_end
+    angles = []
+    for frame in ca_coords_frames:
+        if idx_end > len(frame):
+            continue
+        coords = np.array([frame[i] for i in range(idx_start, idx_end)])
+        if len(coords) < 4:
+            continue
+        centered = coords - coords.mean(axis=0)
+        try:
+            _, _, vh = np.linalg.svd(centered)
+            helix_axis = vh[0]
+            cos_angle = min(1.0, abs(helix_axis[2]))
+            angle = math.degrees(math.acos(cos_angle))
+            angles.append(angle)
+        except Exception:
+            continue
+    return sum(angles) / len(angles) if angles else None
+
+
+def classify_helix(seg_start, seg_end, z_span, center_z, tilt_angle,
+                   membrane_z_center, membrane_half):
+    """
+    Classify a helix as TM, matrix, or IMS-amphipathic:
+      1. length (TM must be >= TM_MIN_LENGTH)
+      2. Z-span (TM must span > TM_Z_SPAN_MIN across the membrane core)
+      3. tilt angle (TM < TM_TILT_MAX; matrix helices > 60 deg)
+      4. Z-position relative to the membrane center
+    """
+    length = seg_end - seg_start + 1
+    z_dist_from_center = abs(center_z - membrane_z_center)
+
+    reasons = []
+    if length < TM_MIN_LENGTH:
+        reasons.append(f"short ({length} aa < {TM_MIN_LENGTH})")
+    if z_span < TM_Z_SPAN_MIN:
+        reasons.append(f"Z-span {z_span:.2f} nm < {TM_Z_SPAN_MIN} nm")
+    if tilt_angle is not None and tilt_angle > TM_TILT_MAX:
+        reasons.append(f"tilt {tilt_angle:.1f} deg > {TM_TILT_MAX} deg")
+    if z_dist_from_center > membrane_half * 1.5:
+        reasons.append(f"Z-center {center_z:.2f} nm too far from membrane")
+
+    if not reasons:
+        return "TM_HELIX", "all criteria satisfied"
+    elif z_span < TM_Z_SPAN_MIN or (tilt_angle and tilt_angle > 60):
+        if center_z < membrane_z_center:
+            return "MATRIX_HELIX", "; ".join(reasons)
+        else:
+            return "IMS_HELIX", "; ".join(reasons)
+    else:
+        return "UNCERTAIN", "; ".join(reasons)
+
+
+def assign_mcf_topology(classified_segments):
+    """Assign H1-H6 to TM helices and h12/h34/h56 to matrix helices,
+    following MCF fold topology."""
+    tm_helices = [(s, e, cl, r) for s, e, cl, r in classified_segments
+                  if cl == "TM_HELIX"]
+    mat_helices = [(s, e, cl, r) for s, e, cl, r in classified_segments
+                   if cl == "MATRIX_HELIX"]
+    uncertain = [(s, e, cl, r) for s, e, cl, r in classified_segments
+                 if cl == "UNCERTAIN"]
+
+    result = []
+    tm_names = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+    mat_names = ['h12', 'h34', 'h56']
+
+    for i, (s, e, cl, r) in enumerate(sorted(tm_helices, key=lambda x: x[0])):
+        name = tm_names[i] if i < len(tm_names) else f"TM{i+1}"
+        result.append((name, s, e, cl, r))
+
+    for i, (s, e, cl, r) in enumerate(sorted(mat_helices, key=lambda x: x[0])):
+        name = mat_names[i] if i < len(mat_names) else f"mat{i+1}"
+        result.append((name, s, e, cl, r))
+
+    for i, (s, e, cl, r) in enumerate(sorted(uncertain, key=lambda x: x[0])):
+        result.append((f"?{i+1}", s, e, cl, r))
+
+    return sorted(result, key=lambda x: x[1])
+
+
+def sequence_only_fallback(occupancy, n_residues):
+    """
+    When no coordinate file is available, use known MCF structural
+    topology to distinguish TM vs matrix helices:
+      h12: between H1 and H2 matrix loops, short, typically < 15 aa
+      h34: between H3 and H4 matrix loops
+      h56: between H5 and H6 matrix loops
+    TM helices are anchored by PxDxx[KR] motifs at H1/H3/H5 ends; the
+    even helices (H2, H4, H6) occur in the most hydrophobic stretches.
+    """
+    TM_RANGES = [(8, 29), (69, 90), (108, 130), (185, 205), (216, 240), (269, 297)]
+    MAT_RANGES = [(40, 55), (160, 175), (242, 258)]
+
+    all_segs = find_all_helix_segments(occupancy, threshold=0.70, min_len=8)
+    result = []
+    tm_names = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+    mat_names = ['h12', 'h34', 'h56']
+    tm_idx = mat_idx = 0
+
+    for seg_s, seg_e in all_segs:
+        length = seg_e - seg_s + 1
+        tm_overlap = any(max(seg_s, tm_s) <= min(seg_e, tm_e)
+                         for tm_s, tm_e in TM_RANGES)
+        mat_overlap = any(max(seg_s, ms) <= min(seg_e, me)
+                          for ms, me in MAT_RANGES)
+
+        if tm_overlap and length >= TM_MIN_LENGTH:
+            name = tm_names[tm_idx] if tm_idx < 6 else f"TM{tm_idx+1}"
+            result.append((name, seg_s, seg_e, "TM_HELIX", "overlaps predicted TM range"))
+            tm_idx += 1
+        elif mat_overlap or length < TM_MIN_LENGTH:
+            name = mat_names[mat_idx] if mat_idx < 3 else f"mat{mat_idx+1}"
+            result.append((name, seg_s, seg_e, "MATRIX_HELIX",
+                          f"short ({length} aa) or in matrix loop region"))
+            mat_idx += 1
+        else:
+            result.append(("?", seg_s, seg_e, "UNCERTAIN",
+                          "does not clearly match TM or matrix ranges"))
+
+    return result
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  With coordinates (recommended):")
+        print("    python3 TMH.py dssp.dat ca_coords.xvg [z_center_nm]")
+        print("  Sequence-based fallback (no coordinate file):")
+        print("    python3 TMH.py dssp.dat")
+        sys.exit(0)
+
+    dssp_file = sys.argv[1]
+    ca_file = sys.argv[2] if len(sys.argv) >= 3 else None
+    membrane_z = float(sys.argv[3]) if len(sys.argv) >= 4 else None
+
+    print(f"Parsing DSSP: {dssp_file}")
+    residue_codes, frame_count, n_residues = parse_dssp(dssp_file)
+    print(f"  {frame_count} frames, {n_residues} residues")
+
+    occupancy = helix_occupancy(residue_codes, frame_count)
+    all_segs = find_all_helix_segments(occupancy, threshold=0.70, min_len=8)
+    print(f"  {len(all_segs)} helical segments found at >=70% occupancy, >=8 residues")
+
+    if ca_file and os.path.exists(ca_file) and membrane_z is not None:
+        print(f"\nParsing Ca coordinates: {ca_file}")
+        ca_frames = parse_ca_coords(ca_file, n_residues)
+        print(f"  {len(ca_frames)} frames parsed")
+        print(f"\nMembrane Z-center: {membrane_z:.2f} nm")
+        print(f"Membrane half-thickness: +/-{MEMBRANE_HALF_THICKNESS:.2f} nm")
+        print(f"Criteria: Z-span > {TM_Z_SPAN_MIN} nm AND tilt < {TM_TILT_MAX} deg")
+
+        classified = []
+        for seg_s, seg_e in all_segs:
+            z_span = helix_z_span(ca_frames, seg_s, seg_e)
+            center_z = helix_center_z(ca_frames, seg_s, seg_e)
+            tilt = helix_tilt_angle(ca_frames, seg_s, seg_e)
+            helix_class, reason = classify_helix(
+                seg_s, seg_e, z_span, center_z, tilt,
+                membrane_z, MEMBRANE_HALF_THICKNESS)
+            classified.append((seg_s, seg_e, helix_class, reason))
+
+        named = assign_mcf_topology(classified)
+    else:
+        if ca_file and not os.path.exists(ca_file):
+            print(f"\nWARNING: {ca_file} not found.")
+        if membrane_z is None:
+            print("\nNo membrane Z-center provided.")
+        print("\nUsing sequence-based MCF topology fallback.")
+        named = sequence_only_fallback(occupancy, n_residues)
+
+    print("\nFINAL HELIX CLASSIFICATION")
+    print(f"{'Name':6} {'Start':6} {'End':5} {'Length':7} {'Type':14} {'Notes'}")
+    for name, s, e, htype, reason in named:
+        length = e - s + 1
+        print(f"{name:6} {s:6} {e:5} {length:7} {htype:14} {reason[:30]}")
+
+
+if __name__ == "__main__":
+    main()
+
+------------------------------------------------------------------
+Result on this system (used for all downstream region definitions)
+------------------------------------------------------------------
+
+TMH     residues
+H1      2-33
+H2      70-94
+H3      104-138
+H4      177-203
+H5      213-242
+H6      274-299
+
+M_loop
+l12_loop  34-48
+l34_loop  139-155
+l56_loop  243-253
+
+M_helix
+h12_helix  49-69
+h34_helix  156-176
+h56_helix  254-273
+
+IMS_loop
+l23_loop  95-103
+l45_loop  204-212
