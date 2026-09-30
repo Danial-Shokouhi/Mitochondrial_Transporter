@@ -1,4 +1,4 @@
-# BOU — analysis code
+# Analysis code
 
 Analysis, statistics and figure-generation code used in study: 
 "The mitochondrial carrier BOU is required for mitochondrial carnitine-dependent acyl and flavin cofactor transport in Arabidopsis"
