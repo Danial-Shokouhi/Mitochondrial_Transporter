@@ -7,7 +7,7 @@ Analysis, statistics and figure-generation code used in study:
 |---|---|
 | **Publication** | *to be added on acceptance* |
 | **Data (Zenodo)** | *https://doi.org/10.5281/zenodo.22040455/* |
-| **This code (archived)** | *10.5281/zenodo.23061841* |
+| **This code (archived)** | *10.5281/zenodo.23061840* |
 | **Licence** | MIT (see [`LICENSE`](LICENSE)) |
 
 All raw and processed data, simulation inputs and production trajectories are
